@@ -5,7 +5,7 @@
 
 # Eve
 run.py
-settings.py
+# settings.py
 
 # Python
 *.py[co]
@@ -65,7 +65,7 @@ _build
 .idea
 
 .cache
-.vscode
+# .vscode
 .pytest_cache
 pip-wheel-metadata/
 !/.eggs/
