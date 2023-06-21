@@ -121,6 +121,12 @@ class BasicAuth():
     def get_mongo_prefix(self):
         return g.get("mongo_prefix")
 
+    def set_mysql_prefix(self, value):
+        g.mysql_prefix = value
+        
+    def get_mysql_prefix(self):
+        return g.get("mysql_prefix")
+    
     def set_request_auth_value(self, value):
         g.auth_value = value
 
