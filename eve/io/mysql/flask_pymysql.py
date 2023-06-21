@@ -1,6 +1,6 @@
 from flask import current_app
-import mysql.connector
-
+# import mysql.connector
+from sqlalchemy import create_engine
 
 class PyMySql:
     """
@@ -55,7 +55,7 @@ class PyMySql:
                 auth_mapping = {"USERNAME": "user", "PASSWORD": "password"}
                 auth_kwargs = config_to_kwargs(auth_mapping)
 
-        cx = mysql.connector.connect(**{**client_kwargs, **auth_kwargs})
+        cx = create_engine(**{**client_kwargs, **auth_kwargs})
         db = cx.cursor()
 
         app.extensions["pymysql"][config_prefix] = (cx, db)
