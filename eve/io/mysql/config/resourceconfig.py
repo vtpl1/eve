@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 
-from eve.exceptions import ConfigException
 from sqlalchemy import types
 from sqlalchemy.ext.associationproxy import association_proxy
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.sql import expression
 
+from eve.exceptions import ConfigException
 from eve.io.mysql.utils import merge_dicts
 
 from .fieldconfig import (

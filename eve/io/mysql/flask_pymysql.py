@@ -1,6 +1,8 @@
 from flask import current_app
+
 # import mysql.connector
 from sqlalchemy import create_engine
+
 
 class PyMySql:
     """

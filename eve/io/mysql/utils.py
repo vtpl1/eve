@@ -12,8 +12,9 @@ import ast
 import copy
 import re
 
-from eve.utils import config
 from sqlalchemy.ext.declarative import DeclarativeMeta
+
+from eve.utils import config
 
 try:
     from collections.abc import Mapping, MutableSequence, Set
@@ -108,22 +109,6 @@ def _sanitize_value(value):
 def _get_id(obj):
     resource = _get_resource(obj)
     return getattr(obj, config.DOMAIN[resource]["id_field"])
-
-
-def extract_sort_arg(req):
-    if req.sort:
-        if re.match(r"^[-,\w.]+$", req.sort):
-            arg = []
-            for s in req.sort.split(","):
-                if s.startswith("-"):
-                    arg.append([s[1:], -1])
-                else:
-                    arg.append([s])
-            return arg
-        else:
-            return ast.literal_eval(req.sort)
-    else:
-        return None
 
 
 def rename_relationship_fields_in_sort_args(model, sort):

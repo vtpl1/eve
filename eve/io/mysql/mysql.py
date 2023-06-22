@@ -1,149 +1,41 @@
 import ast
-import decimal
-import itertools
-from collections import OrderedDict
+import collections
 from copy import copy
-from datetime import datetime
-import simplejson as json
-from bson import ObjectId, decimal128
-from bson.dbref import DBRef
-from flask import abort, g, request
-from werkzeug.exceptions import HTTPException
+from http.client import HTTPException
 
-from ...versioning import versioned_id_field
-from eve.io.mysql.parser import ParseError, parse
+import simplejson as json
+from flask import abort, g, request
+
 from eve.auth import resource_auth
-from eve.io.base import BaseJSONEncoder, ConnectionException, DataLayer
-from eve.utils import (
-    config,
-    debug_error_message,
-    str_to_date,
-    str_type,
+from eve.io.base import ConnectionException, DataLayer
+from eve.io.mysql.parser import ParseError, parse
+from eve.utils import config, debug_error_message, str_to_date, validate_filters
+
+string_type = str
+
+from .flask_pymysql import PyMySql
+from .parser import ParseError, parse, parse_dictionary, parse_sorting, sqla_op
+from .structures import SQLAResultCollection
+from .utils import (
+    rename_relationship_fields_in_dict,
+    rename_relationship_fields_in_sort_args,
+    rename_relationship_fields_in_str,
+    sqla_object_to_dict,
     validate_filters,
 )
-from .flask_pymysql import PyMySql
 
 
 class MySql(DataLayer):
     """MySql data access layer for Eve REST API."""
+
     serializers = {
-        'datetime': str_to_date,
-        'number': lambda val: json.loads(val) if val is not None else None,
+        "datetime": str_to_date,
+        "number": lambda val: json.loads(val) if val is not None else None,
     }
 
     def init_app(self, app):
         self.driver = PyMySqls(self)
         self.mysql_prefix = None
-
-    def find(self, resource, req, sub_resource_lookup, perform_count=True):
-        """Retrieves a set of documents matching a given request. Queries can
-        be expressed in two different formats: the mongo query syntax, and the
-        python syntax. The first kind of query would look like: ::
-
-            ?where={"name": "john doe"}
-
-        while the second would look like: ::
-
-            ?where=name=="john doe"
-
-        The resultset if paginated.
-
-        :param resource: resource name.
-        :param req: a :class:`ParsedRequest`instance.
-        :param sub_resource_lookup: sub-resource lookup from the endpoint url.
-
-        """
-        args = {}
-
-        if req and req.max_results:
-            args["limit"] = req.max_results
-
-        if req and req.page > 1:
-            args["skip"] = (req.page - 1) * req.max_results
-
-        # TODO sort syntax should probably be coherent with 'where': either
-        # mongo-like # or python-like. Currently accepts only mongo-like sort
-        # syntax.
-
-        # TODO should validate on unknown sort fields (mongo driver doesn't
-        # return an error)
-
-        client_sort = self._convert_sort_request_to_dict(req)
-        spec = self._convert_where_request_to_dict(resource, req)
-
-        bad_filter = validate_filters(spec, resource)
-        if bad_filter:
-            abort(400, bad_filter)
-
-        if sub_resource_lookup:
-            spec = self.combine_queries(spec, sub_resource_lookup)
-
-        if (
-            config.DOMAIN[resource]["soft_delete"]
-            and not (req and req.show_deleted)
-            and not self.query_contains_field(spec, config.DELETED)
-        ):
-            # Soft delete filtering applied after validate_filters call as
-            # querying against the DELETED field must always be allowed when
-            # soft_delete is enabled
-            spec = self.combine_queries(spec, {config.DELETED: {"$ne": True}})
-
-        spec = self._mongotize(spec, resource)
-
-        client_projection = self._client_projection(req)
-
-        datasource, spec, projection, sort = self._datasource_ex(
-            resource, spec, client_projection, client_sort
-        )
-
-        if req and req.if_modified_since:
-            spec[config.LAST_UPDATED] = {"$gt": req.if_modified_since}
-
-        if len(spec) > 0:
-            args["filter"] = spec
-
-        if sort is not None:
-            args["sort"] = sort
-
-        if projection:
-            args["projection"] = projection
-
-        target = self.pymysql(resource).db
-        try:
-            query = "SELECT channel_id, event_type, event_starttime FROM v_event"
-            print("query:------ {}".format(query))
-            s = target.execute(query)
-            print("+++++++++++ {}".format(s))
-            # result = target.find(**args)
-            result = s
-        except TypeError as e:
-            # pymysql raises ValueError when invalid query paramenters are
-            # included. We do our best to catch them beforehand but, especially
-            # with key/value sort syntax, invalid ones might still slip in.
-            self.app.logger.exception(e)
-            abort(400, description=debug_error_message(str(e)))
-
-        if perform_count:
-            try:
-                count = 0  # target.count_documents(spec)
-            except Exception:
-                # fallback to deprecated method. this might happen when the query
-                # includes operators not supported by count_documents(). one
-                # documented use-case is when we're running on mongo 3.4 and below,
-                # which does not support $expr ($expr must replace $where # in
-                # count_documents()).
-
-                # 1. Mongo 3.6+; $expr: pass
-                # 2. Mongo 3.6+; $where: pass (via fallback)
-                # 3. Mongo 3.4; $where: pass (via fallback)
-                # 4. Mongo 3.4; $expr: fail (operator not supported by db)
-
-                # See: http://api.mongodb.com/python/current/api/pymongo/collection.html#pymongo.collection.Collection.count
-                count = target.count()
-        else:
-            count = None
-
-        return result, count
 
     def _convert_sort_request_to_dict(self, req):
         """Converts the contents of a `ParsedRequest`'s `sort` property to
@@ -194,100 +86,373 @@ class MySql(DataLayer):
                     )
         return query
 
-    def _mongotize(self, source, resource, parse_objectid=False):
-        """Recursively iterates a JSON dictionary, turning RFC-1123 strings
-        into datetime values and ObjectId-link strings into ObjectIds.
+    def find(self, resource, req, sub_resource_lookup, perform_count=True):
+        """Retrieves a set of documents matching a given request. Queries can
+        be expressed in two different formats: the mongo query syntax, and the
+        python syntax. The first kind of query would look like: ::
 
-        .. versionchanged:: 0.3
-           'query_objectid_as_string' allows to bypass casting string types
-           to objectids.
+            ?where={"name": "john doe"}
 
-        .. versionchanged:: 0.1.1
-           Renamed from _jsondatetime to _mongotize, as it now handles
-           ObjectIds too.
+        while the second would look like: ::
 
-        .. versionchanged:: 0.1.0
-           Datetime conversion was failing on Py2, since 0.0.9 :P
+            ?where=name=="john doe"
 
-        .. versionchanged:: 0.0.9
-           support for Python 3.3.
+        The resultset if paginated.
 
-        .. versionadded:: 0.0.4
+        :param resource: resource name.
+        :param req: a :class:`ParsedRequest`instance.
+        :param sub_resource_lookup: sub-resource lookup from the endpoint url.
         """
-        resource_def = config.DOMAIN[resource]
-        schema = resource_def.get("schema")
-        id_field = resource_def["id_field"]
-        id_field_versioned = versioned_id_field(resource_def)
-        query_objectid_as_string = resource_def.get("query_objectid_as_string", False)
-        parse_objectid = parse_objectid or not query_objectid_as_string
+        args = {}
 
-        def try_cast(k, v, should_parse_objectid):
+        if req and req.max_results:
+            args["limit"] = req.max_results
+
+        if req and req.page > 1:
+            args["skip"] = (req.page - 1) * req.max_results
+
+        # TODO sort syntax should probably be coherent with 'where': either
+        # mongo-like # or python-like. Currently accepts only mongo-like sort
+        # syntax.
+
+        # TODO should validate on unknown sort fields (mongo driver doesn't
+        # return an error)
+
+        client_sort = self._convert_sort_request_to_dict(req)
+        spec = self._convert_where_request_to_dict(resource, req)
+
+        client_projection = self._client_projection(req)
+
+        client_embedded = self._client_embedded(req)
+
+        datasource, spec, projection, sort = self._datasource_ex(
+            resource, spec, client_projection, client_sort
+        )
+        print("++++++++++++++" + datasource)
+        if len(spec) > 0:
+            args["filter"] = spec
+
+        if sort is not None:
+            args["sort"] = sort
+
+        if projection:
+            args["projection"] = projection
+
+        model = datasource
+
+        if req.where:
             try:
-                return datetime.strptime(v, config.DATE_FORMAT)
-            except Exception:
-                if k in (id_field, id_field_versioned) or should_parse_objectid:
-                    try:
-                        # Convert to unicode because ObjectId() interprets
-                        # 12-character strings (but not unicode) as binary
-                        # representations of ObjectId's.  See
-                        # https://github.com/pyeve/eve/issues/508
-                        try:
-                            r = ObjectId(unicode(v))
-                        except NameError:
-                            # We're on Python 3 so it's all unicode already.
-                            r = ObjectId(v)
-                        return r
-                    except Exception:
-                        return v
-                else:
-                    return v
+                where = rename_relationship_fields_in_str(model, req.where)
+                args["spec"] = self.combine_queries(args["spec"], parse(where, model))
+            except ParseError:
+                try:
+                    spec = rename_relationship_fields_in_dict(
+                        model, json.loads(req.where)
+                    )
+                    args["spec"] = self.combine_queries(
+                        args["spec"], parse_dictionary(spec, model)
+                    )
+                except (AttributeError, TypeError):
+                    # if parse failed and json loads fails - raise 400
+                    abort(400)
 
-        def get_schema_type(keys, schema):
-            def dict_sub_schema(base):
-                if base.get("type") == "dict":
-                    return base.get("schema")
-                return base
+        bad_filter = validate_filters(args["spec"], resource)
+        if bad_filter:
+            abort(400, bad_filter)
 
-            if not isinstance(schema, dict):
-                return None
-            if not keys:
-                return schema.get("type")
+        if sub_resource_lookup:
+            sub_resource_lookup = rename_relationship_fields_in_dict(
+                model, sub_resource_lookup
+            )
+            args["spec"] = self.combine_queries(
+                args["spec"], parse_dictionary(sub_resource_lookup, model)
+            )
 
-            k = keys[0]
-            keys = keys[1:]
-            schema_type = schema[k].get("type") if k in schema else None
-            if schema_type == "list":
-                if "items" in schema[k]:
-                    items = schema[k].get("items") or []
-                    possible_types = [get_schema_type(keys, item) for item in items]
-                    if "objectid" in possible_types:
-                        return "objectid"
-                    return next((t for t in possible_types if t), None)
-                if "schema" in schema[k]:
-                    # recursively check the schema
-                    return get_schema_type(keys, dict_sub_schema(schema[k]["schema"]))
-            elif schema_type == "dict":
-                if "schema" in schema[k]:
-                    return get_schema_type(keys, dict_sub_schema(schema[k]["schema"]))
-            else:
-                return schema_type
+        if req.if_modified_since:
+            updated_filter = sqla_op.gt(
+                getattr(model, self.app.config.LAST_UPDATED), req.if_modified_since
+            )
+            args["spec"].append(updated_filter)
 
-        for k, v in source.items():
-            keys = k.split(".")
-            schema_type = get_schema_type(keys, schema)
-            is_objectid = (schema_type == "objectid") or parse_objectid
-            if isinstance(v, dict):
-                self._mongotize(v, resource, is_objectid)
-            elif isinstance(v, list):
-                for i, v1 in enumerate(v):
-                    if isinstance(v1, dict):
-                        source[k][i] = self._mongotize(v1, resource)
+        query = self.driver.db.session.query(model)
+
+        if args["sort"]:
+            args["sort"] = [parse_sorting(model, *a) for a in args["sort"]]
+
+        if req.max_results:
+            args["max_results"] = req.max_results
+        if req.page > 1:
+            args["page"] = req.page
+        fields = projection
+        return SQLAResultCollection(query, fields, **args)
+
+    def find_one(
+        self,
+        resource,
+        req,
+        check_auth_value=True,
+        force_auth_field_projection=False,
+        mongo_options=None,
+        **lookup
+    ):
+        client_projection = self._client_projection(req)
+        client_embedded = self._client_embedded(req)
+        model, filter_, fields, _ = self._datasource_ex(
+            resource, [], client_projection, None, client_embedded
+        )
+
+        lookup = rename_relationship_fields_in_dict(model, lookup)
+        id_field = self._id_field(resource)
+        if isinstance(lookup.get(id_field), dict) or isinstance(
+            lookup.get(id_field), list
+        ):
+            # very dummy way to get the related object
+            # that commes from embeddable parameter
+            return lookup
+        else:
+            filter_ = self.combine_queries(filter_, parse_dictionary(lookup, model))
+            query = self.driver.db.session.query(model)
+            document = query.filter(*filter_).first()
+
+        return sqla_object_to_dict(document, fields) if document else None
+
+    def find_one_raw(self, resource, **lookup):
+        id_field = config.DOMAIN[resource]["id_field"]
+        _id = lookup.get(id_field)
+
+        model, filter_, fields, _ = self._datasource_ex(resource, [], None, None, None)
+        id_field = self._id_field(resource)
+        lookup = {id_field: _id}
+        filter_ = self.combine_queries(filter_, parse_dictionary(lookup, model))
+        document = self.driver.db.session.query(model).filter(*filter_).first()
+        return sqla_object_to_dict(document, fields) if document else None
+
+    def find_list_of_ids(self, resource, ids, client_projection=None):
+        raise NotImplementedError
+
+    def insert(self, resource, doc_or_docs):
+        rv = []
+        for document in doc_or_docs:
+            model_instance = self._create_model_instance(resource, document)
+            self.driver.db.session.add(model_instance)
+            self.driver.db.session.commit()
+            id_field = self._id_field(resource)
+            document[id_field] = getattr(model_instance, id_field)
+            rv.append(document[id_field])
+        return rv
+
+    def _create_model_instance(self, resource, dict_):
+        model, _, _, _ = self._datasource_ex(resource)
+        attrs = self._get_model_attributes(resource, dict_)
+        return model(**attrs)
+
+    def _get_model_attributes(self, resource, dict_):
+        schema = self.app.config["DOMAIN"][resource]["schema"]
+        fields = {}
+        for field, value in dict_.items():
+            if field in schema and "data_relation" in schema[field]:
+                if isinstance(value, collections.Mapping):
+                    fields[field] = self._create_model_instance(
+                        schema[field]["data_relation"]["resource"], value
+                    )
+                elif "local_id_field" in schema[field]:
+                    fields[schema[field]["local_id_field"]] = value
+            elif field in schema and schema[field]["type"] in ("list", "set"):
+                if (
+                    "schema" in schema[field]
+                    and "data_relation" in schema[field]["schema"]
+                ):
+                    sub_schema = schema[field]["schema"]
+                    related_resource = sub_schema["data_relation"]["resource"]
+                    contains_ids = False
+                    list_ = []
+                    for v in value:
+                        if isinstance(v, collections.Mapping):
+                            list_.append(
+                                self._create_model_instance(related_resource, v)
+                            )
+                        else:
+                            contains_ids = True
+                            list_.append(v)
+                    collection = set(list_) if schema[field]["type"] == "set" else list_
+                    if contains_ids and "local_id_field" in schema[field]:
+                        fields[schema[field]["local_id_field"]] = collection
+                    elif contains_ids:
+                        related_model = self._datasource_ex(related_resource)[0]
+                        lookup = {sub_schema["data_relation"]["field"]: list(value)}
+                        filter_ = parse_dictionary(lookup, related_model)
+                        fields[field] = (
+                            self.driver.db.session.query(related_model)
+                            .filter(*filter_)
+                            .all()
+                        )
+                        if schema[field]["type"] == "set":
+                            fields[field] = set(fields[field])
                     else:
-                        source[k][i] = try_cast(k, v1, is_objectid)
-            elif isinstance(v, str_type):
-                source[k] = try_cast(k, v, is_objectid)
+                        fields[field] = collection
+                else:
+                    fields[field] = value
+            else:
+                fields[field] = value
+        return fields
 
-        return source
+    def replace(self, resource, id_, document, original):
+        model, filter_, fields_, _ = self._datasource_ex(resource, [])
+        id_field = self._id_field(resource)
+        filter_ = self.combine_queries(
+            filter_, parse_dictionary({id_field: id_}, model)
+        )
+        query = self.driver.db.session.query(model)
+
+        # Find and delete the old object
+        old_model_instance = query.filter(*filter_).first()
+        if old_model_instance is None:
+            abort(500, description=debug_error_message("Object not existent"))
+        self._handle_immutable_id(id_field, old_model_instance, document)
+        self.driver.db.session.delete(old_model_instance)
+
+        # create and insert the new one
+        model_instance = self._create_model_instance(resource, document)
+        id_field = self._id_field(resource)
+        setattr(model_instance, id_field, id_)
+        self.driver.db.session.add(model_instance)
+        self.driver.db.session.commit()
+
+    def update(self, resource, id_, updates, original):
+        model, filter_, _, _ = self._datasource_ex(resource, [])
+        id_field = self._id_field(resource)
+        filter_ = self.combine_queries(
+            filter_, parse_dictionary({id_field: id_}, model)
+        )
+        query = self.driver.db.session.query(model)
+        model_instance = query.filter(*filter_).first()
+        if model_instance is None:
+            abort(500, description=debug_error_message("Object not existent"))
+        self._handle_immutable_id(id_field, model_instance, updates)
+        attrs = self._get_model_attributes(resource, updates)
+        for k, v in attrs.items():
+            setattr(model_instance, k, v)
+        self.driver.db.session.commit()
+
+    def _handle_immutable_id(self, id_field, original_instance, updates):
+        if (
+            id_field in updates
+            and getattr(original_instance, id_field) != updates[id_field]
+        ):
+            description = (
+                "Attempt to update an immutable field. Usually happens "
+                "when PATCH or PUT include a '%s' field, "
+                "which is immutable (PUT can include it as long as "
+                "it is unchanged)." % id_field
+            )
+            abort(400, description=description)
+
+    def remove(self, resource, lookup):
+        model, filter_, _, _ = self._datasource_ex(resource, [])
+        lookup = rename_relationship_fields_in_dict(model, lookup)
+        filter_ = self.combine_queries(filter_, parse_dictionary(lookup, model))
+        query = self.driver.db.session.query(model)
+        if len(filter_):
+            query = query.filter(*filter_)
+        for item in query:
+            self.driver.db.session.delete(item)
+
+        self.driver.db.session.commit()
+
+    def _source(self, resource):
+        return self.driver.app.config["SOURCES"][resource]["source"]
+
+    def _id_field(self, resource):
+        return self.driver.app.config["DOMAIN"][resource]["id_field"]
+
+    def _model(self, resource):
+        return self.driver.Model._decl_class_registry[self._source(resource)]
+
+    def _parse_filter(self, model, filter):
+        """
+        Convert from Mongo/JSON style filters to SQLAlchemy expressions.
+        """
+        if filter is None or len(filter) == 0:
+            filter = []
+        elif isinstance(filter, string_type):
+            filter = parse(filter, model)
+        elif isinstance(filter, dict):
+            filter = parse_dictionary(filter, model)
+        elif not isinstance(filter, list):
+            filter = []
+        return filter
+
+    def datasource(self, resource):
+        """
+        Overridden from super to return the actual model class of the database
+        table instead of the name of it. We also parse the filter coming from
+        the schema definition into a SQL compatible filter
+        """
+        model = self._model(resource)
+
+        resource_def = self.driver.app.config["SOURCES"][resource]
+        filter_ = resource_def["filter"]
+        filter_ = self._parse_filter(model, filter_)
+        projection_ = copy(resource_def["projection"])
+        sort_ = copy(resource_def["default_sort"])
+        return model, filter_, projection_, sort_
+
+    # NOTE(Gonéri): preserve the _datasource method for compatibiliy with
+    # pre 0.6 Eve release (See: commit 87742343fd0362354b9f75c749651f92d6e4a9c8
+    # from the Eve repository)
+    def _datasource(self, resource):
+        return self.datasource(resource)
+
+    def _datasource_ex(
+        self,
+        resource,
+        query=None,
+        client_projection=None,
+        client_sort=None,
+        client_embedded=None,
+    ):
+        model, filter_, fields_, sort_ = super(MySql, self)._datasource_ex(
+            resource, query, client_projection, client_sort
+        )
+        filter_ = self._parse_filter(model, filter_)
+        fields = [field for field in fields_.keys() if fields_[field]]
+        if sort_ is not None:
+            sort_ = rename_relationship_fields_in_sort_args(model, sort_)
+        return model, filter_, fields, sort_
+
+    def combine_queries(self, query_a, query_b):
+        # TODO: dumb concatenation of query lists.
+        #       We really need to check for duplicate queries
+        query_a.extend(query_b)
+        return query_a
+
+    def is_empty(self, resource):
+        model, filter_, _, _ = self.datasource(resource)
+        query = self.driver.db.session.query(model)
+        if len(filter_):
+            return query.filter_by(*filter_).count() == 0
+        else:
+            return query.count() == 0
+
+    def _client_embedded(self, req):
+        """Returns a properly parsed client embeddable if available.
+
+        :param req: a :class:`ParsedRequest` instance.
+
+        .. versionadded:: 0.4
+        """
+        client_embedded = {}
+        if req and req.embedded:
+            try:
+                client_embedded = json.loads(req.embedded)
+            except json.JSONDecodeError:
+                abort(
+                    400,
+                    description=debug_error_message(
+                        "Unable to parse `embedded` clause"
+                    ),
+                )
+        return client_embedded
 
     def current_mysql_prefix(self, resource=None):
         auth = None

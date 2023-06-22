@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 
-from utils import sqla_object_to_dict
+from .utils import sqla_object_to_dict
+
 
 class SQLAResultCollection:
     """
@@ -14,18 +15,19 @@ class SQLAResultCollection:
     :param max_results: number of entries to be returned per page
     :param page: page requested
     """
+
     def __init__(self, query, fields, **kwargs):
         self._query = query
         self._fields = fields
-        self._spec = kwargs.get('spec')
-        self._sort = kwargs.get('sort')
-        self._max_results = kwargs.get('max_results')
-        self._page = kwargs.get('page')
-        self._resource = kwargs.get('resource')
+        self._spec = kwargs.get("spec")
+        self._sort = kwargs.get("sort")
+        self._max_results = kwargs.get("max_results")
+        self._page = kwargs.get("page")
+        self._resource = kwargs.get("resource")
         if self._spec:
             self._query = self._query.filter(*self._spec)
         if self._sort:
-            for (order_by, joins) in self._sort:
+            for order_by, joins in self._sort:
                 self._query = self._query.filter(*joins).order_by(order_by)
 
         # save the count of items to an internal variables before applying the
@@ -34,8 +36,8 @@ class SQLAResultCollection:
         if self._max_results:
             self._query = self._query.limit(self._max_results)
             if self._page:
-                self._query = self._query.offset((self._page - 1) *
-                                                 self._max_results)
+                self._query = self._query.offset((self._page - 1) * self._max_results)
+
     def __iter__(self):
         for i in self._query:
             yield sqla_object_to_dict(i, self._fields)
