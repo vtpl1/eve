@@ -1,51 +1,31 @@
-from eve import Eve
-from eve.io.mongo.mongo import Mongo
-from eve.io.mysql import MySql
-from settings import SETTINGS
-# settings = {
-#     "MYSQL_HOST": "172.16.4.24",
-#     "MYSQL_PORT": "3309",
-#     "MYSQL_DBNAME": "ivms_30",
-#     "MYSQL_USERNAME": "root",
-#     "MYSQL_PASSWORD": "root",
-#     "DOMAIN": {"people": {}, "v_event": {}},
-# }
+from sqlalchemy import create_engine, select
 
-app = Eve(settings=SETTINGS, data=MySql)
-app.run()
-# import mysql.connector
-# import datetime
+from tables import Address, Base, User, VLoginUser
 
-# config = {
-#     "user": "root",
-#     "password": "root",
-#     "host": "172.16.4.24",
-#     "port": 3309,
-#     "database": "ivms_30",
-#     "raise_on_warnings": True,
-#     "use_pure": False,
-# }
+engine = create_engine("mysql+mysqlconnector://root:root@172.16.4.24:3309/ivms_30", echo=True, pool_recycle=3600)
+# Base.metadata.create_all(engine)
 
+from sqlalchemy.orm import Session
 
-# with mysql.connector.connect(**config) as cnx:
-#     cursor = cnx.cursor()
-
-#     query = (
-#         "SELECT channel_id, event_type, event_starttime FROM v_event "
-#         "WHERE event_starttime BETWEEN %s AND %s"
+# with Session(engine) as session:
+#     spongebob = User(
+#         name="spongebob",
+#         fullname="Spongebob Squarepants",
+#         addresses=[Address(email_address="spongebob@sqlalchemy.org")],
 #     )
-
-#     start = datetime.datetime(2023, 5, 1).timestamp() * 1000
-#     end = datetime.datetime(2023, 6, 30).timestamp() * 1000
-#     print("start time: {}, end time: {}".format(start, end))
-
-#     cursor.execute(query, (start, end))
-
-#     for channel_id, event_type, event_starttime in cursor:
-#         print(
-#             "{}, {} fff {:%d %b %Y}".format(
-#                 channel_id, event_type, datetime.datetime.fromtimestamp(event_starttime/1000)
-#             )
-#         )
-
-#     cursor.close()
+#     sandy = User(
+#         name="sandy",
+#         fullname="Sandy Cheeks",
+#         addresses=[
+#             Address(email_address="sandy@sqlalchemy.org"),
+#             Address(email_address="sandy@squirrelpower.org"),
+#         ],
+#     )
+#     patrick = User(name="patrick", fullname="Patrick Star")
+#     session.add_all([spongebob, sandy, patrick])
+#     session.commit()
+    
+with Session(engine) as session:
+    stmt = select(VLoginUser.id, VLoginUser.password).where(VLoginUser.id.in_(["admin"]))
+    for user in session.execute(stmt):
+        print(user)
