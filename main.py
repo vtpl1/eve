@@ -1,17 +1,17 @@
 from eve import Eve
 from eve.io.mongo.mongo import Mongo
 from eve.io.mysql import MySql
+from settings import SETTINGS
+# settings = {
+#     "MYSQL_HOST": "172.16.4.24",
+#     "MYSQL_PORT": "3309",
+#     "MYSQL_DBNAME": "ivms_30",
+#     "MYSQL_USERNAME": "root",
+#     "MYSQL_PASSWORD": "root",
+#     "DOMAIN": {"people": {}, "v_event": {}},
+# }
 
-settings = {
-    "MYSQL_HOST": "172.16.4.24",
-    "MYSQL_PORT": "3309",
-    "MYSQL_DBNAME": "ivms_30",
-    "MYSQL_USERNAME": "root",
-    "MYSQL_PASSWORD": "root",
-    "DOMAIN": {"people": {}, "v_event": {}},
-}
-
-app = Eve(settings=settings, data=MySql)
+app = Eve(settings=SETTINGS, data=MySql)
 app.run()
 # import mysql.connector
 # import datetime

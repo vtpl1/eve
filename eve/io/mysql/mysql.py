@@ -26,6 +26,10 @@ from .flask_pymysql import PyMySql
 
 class MySql(DataLayer):
     """MySql data access layer for Eve REST API."""
+    serializers = {
+        'datetime': str_to_date,
+        'number': lambda val: json.loads(val) if val is not None else None,
+    }
 
     def init_app(self, app):
         self.driver = PyMySqls(self)

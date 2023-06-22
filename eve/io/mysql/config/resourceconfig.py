@@ -3,11 +3,11 @@ from __future__ import unicode_literals
 
 from eve.exceptions import ConfigException
 from sqlalchemy import types
-from sqlalchemy.ext.associationproxy import ASSOCIATION_PROXY
-from sqlalchemy.ext.hybrid import HYBRID_PROPERTY
+from sqlalchemy.ext.associationproxy import association_proxy
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.sql import expression
 
-from eve_sqlalchemy.utils import merge_dicts
+from eve.io.mysql.utils import merge_dicts
 
 from .fieldconfig import (
     AssociationProxyFieldConfig,
@@ -168,7 +168,7 @@ class ResourceConfig(object):
             k
             for k, v in self.model.__dict__.items()
             if k not in self._ignored_fields
-            and getattr(v, "extension_type", None) == ASSOCIATION_PROXY
+            and getattr(v, "extension_type", None) == association_proxy
         ]
 
     def _get_relationship_fields(self, proxied_relationships):
@@ -205,7 +205,7 @@ class ResourceConfig(object):
             k
             for k, v in self.model.__dict__.items()
             if k not in self._ignored_fields
-            and getattr(v, "extension_type", None) == HYBRID_PROPERTY
+            and getattr(v, "extension_type", None) == hybrid_property
         ]
 
     def _render_schema(self, field_configs, related_resource_configs):

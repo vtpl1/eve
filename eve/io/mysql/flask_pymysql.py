@@ -55,8 +55,8 @@ class PyMySql:
                 auth_mapping = {"USERNAME": "user", "PASSWORD": "password"}
                 auth_kwargs = config_to_kwargs(auth_mapping)
 
-        cx = create_engine(**{**client_kwargs, **auth_kwargs})
-        db = cx.cursor()
+        cx = create_engine("sqlite://", echo=True)
+        db = cx
 
         app.extensions["pymysql"][config_prefix] = (cx, db)
 
